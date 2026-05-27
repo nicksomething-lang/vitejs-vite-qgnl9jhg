@@ -1,3 +1,4 @@
+import mothershipLogo from './assets/mothership.jpg';
 import { useState, useRef, useCallback } from 'react'
 import {
   DndContext, closestCenter, PointerSensor, TouchSensor, useSensor, useSensors,
@@ -8,6 +9,17 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import { supabase } from './supabaseClient'
 import { EVENT_CODE, EVENT_NAME, CATEGORIES } from './config'
+
+function AppLayout({ children }) {
+  return (
+    <div className="app-shell">
+      <header className="app-header">
+        <img src={mothershipLogo} alt="Mothership Meltdown 2026" className="app-logo" />
+      </header>
+      <main>{children}</main>
+    </div>
+  )
+}
 
 export default function App() {
   const [step, setStep] = useState('code')
@@ -116,41 +128,63 @@ export default function App() {
     setStep('submitted')
   }
 
+  // 1. Code entry screen (Title removed, form elements restored)
   if (step === 'code') return (
-    <div className="screen">
-      <h1>{EVENT_NAME}</h1>
-      <p className="muted">Enter your judge code to begin or resume.</p>
-      <input className="input" value={judgeCode}
-        onChange={e => setJudgeCode(e.target.value)}
-        placeholder="Judge code" autoCapitalize="off" />
-      <button className="btn-primary" onClick={handleCodeSubmit}>Continue</button>
-      {error && <p className="error">{error}</p>}
-    </div>
+    <AppLayout>
+      <div className="screen">
+        <p className="muted">Enter your official judge code to begin:</p>
+        <input
+          type="text"
+          className="input"
+          placeholder="Judge Code"
+          value={judgeCode}
+          onChange={(e) => setJudgeCode(e.target.value)}
+        />
+        <button className="btn-primary" onClick={handleCodeSubmit}>
+          Enter
+        </button>
+        {error && <div className="error">{error}</div>}
+      </div>
+    </AppLayout>
   )
 
+  // 2. Judge name confirmation screen
   if (step === 'name') return (
-    <div className="screen">
-      <h1>Welcome</h1>
-      <p className="muted">What name should appear on your scorecard?</p>
-      <input className="input" value={judgeName}
-        onChange={e => setJudgeName(e.target.value)} placeholder="Your name" />
-      <button className="btn-primary" onClick={handleNameSubmit}>Start Judging</button>
-      {error && <p className="error">{error}</p>}
-    </div>
+    <AppLayout>
+      <div className="screen">
+        <p className="muted">Please enter your name for this judging session:</p>
+        <input
+          type="text"
+          className="input"
+          placeholder="Your Name"
+          value={judgeName}
+          onChange={(e) => setJudgeName(e.target.value)}
+        />
+        <button className="btn-primary" onClick={handleNameSubmit}>
+          Continue to Rankings
+        </button>
+        {error && <div className="error">{error}</div>}
+      </div>
+    </AppLayout>
   )
 
+  // 3. Already submitted final screen
   if (step === 'submitted') return (
-    <div className="screen">
-      <h1>Submitted</h1>
-      <p>Thanks, {judgeName}. Your rankings have been locked in.</p>
-      <p className="muted">Submitted {new Date(submittedAt).toLocaleString()}.</p>
-    </div>
+    <AppLayout>
+      <div className="screen">
+        <h2>Submission Received</h2>
+        <p className="muted">Thank you, {judgeName}. Your final rankings have been locked and submitted.</p>
+      </div>
+    </AppLayout>
   )
 
+  // 4. Main ranking screen
   return (
-    <RankingScreen judgeName={judgeName} ranking={ranking} notes={notes}
-      onDragEnd={handleDragEnd} onNotesUpdate={handleNotesUpdate}
-      onSubmit={handleSubmit} saveStatus={saveStatus} />
+    <AppLayout>
+      <RankingScreen judgeName={judgeName} ranking={ranking} notes={notes}
+        onDragEnd={handleDragEnd} onNotesUpdate={handleNotesUpdate}
+        onSubmit={handleSubmit} saveStatus={saveStatus} />
+    </AppLayout>
   )
 }
 
@@ -201,57 +235,5 @@ function SortableEntry({ id, position, hasNotes, onTap }) {
     opacity: isDragging ? 0.5 : 1,
   }
   return (
-    <li ref={setNodeRef} style={style} className="rank-item">
-      <span className="drag-handle" {...attributes} {...listeners} aria-label="Drag to reorder">⋮⋮</span>
-      <span className="position">{position}</span>
-      <span className="entry-num">Entry #{id}</span>
-      <button className="notes-btn" onClick={onTap} aria-label="Add notes">
-        {hasNotes ? '📝' : '＋'}
-      </button>
-    </li>
-  )
-}
-
-function EntryModal({ entryNum, notes, onClose, onSave }) {
-  const [local, setLocal] = useState(notes)
-  const updateField = (key, value) => {
-    const next = { ...local, [key]: value }
-    setLocal(next)
-    onSave(next)
-  }
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
-        <header className="modal-header">
-          <h2>Entry #{entryNum}</h2>
-          <button className="close-btn" onClick={onClose} aria-label="Close">×</button>
-        </header>
-        <div className="modal-body">
-          {CATEGORIES.map(cat => (
-            <div key={cat.key} className="category-block">
-              <label className="cat-label">{cat.label}</label>
-              <p className="cat-desc">{cat.description}</p>
-              <textarea className="cat-notes" value={local[cat.key] || ''}
-                onChange={e => updateField(cat.key, e.target.value)}
-                placeholder="Your notes..." rows={3} />
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function hasAnyNote(entryNotes) {
-  if (!entryNotes) return false
-  return Object.values(entryNotes).some(v => v && v.trim().length > 0)
-}
-
-function saveStatusLabel(status) {
-  switch (status) {
-    case 'saving': return 'Saving…'
-    case 'saved': return 'Saved ✓'
-    case 'error': return 'Save failed — check connection'
-    default: return ''
-  }
-}
+    <li ref={setNodeRef} style={style}
+    
