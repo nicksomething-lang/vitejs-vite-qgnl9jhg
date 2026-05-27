@@ -122,6 +122,7 @@ body, html {
   cursor: grab;
   padding: 0 12px 0 4px;
   user-select: none;
+  touch-action: none;
 }
 
 .drag-handle:active {
