@@ -375,9 +375,8 @@ body, html {
 .top-header-image {
   width: 100%;
   display: block;
-  max-height: 80px;
-  object-fit: cover;
-  object-position: center;
+  max-height: 160px;
+  object-fit: contain;
   border-bottom: 2px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
 }
