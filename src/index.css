@@ -387,9 +387,7 @@ body, html, .app-shell {
 .modal {
   background-color: #E5CE71 !important;
 }
-.modal-title, .cat-label, .cat-desc, .modal-header h1 { text-align: center; }
-
-  * {
+.modal-title, .cat-label, .cat-desc, .modal-header * {
   color: #111827 !important;
 }
 .modal-header {
