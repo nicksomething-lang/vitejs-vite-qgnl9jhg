@@ -1,19 +1,4 @@
 import { useState, useRef, useCallback } from 'react';
-import {
-  DndContext,
-  closestCenter,
-  PointerSensor,
-  TouchSensor,
-  useSensor,
-  useSensors,
-} from '@dnd-kit/core';
-import {
-  arrayMove,
-  SortableContext,
-  useSortable,
-  verticalListSortingStrategy,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
 import { supabase } from './supabaseClient';
 import { EVENT_CODE, EVENT_NAME, CATEGORIES } from './config';
 
@@ -21,7 +6,7 @@ export default function App() {
   const [step, setStep] = useState('code');
   const [judgeCode, setJudgeCode] = useState('');
   const [judgeName, setJudgeName] = useState('');
-  const [ranking, setRanking] = useState([]);
+  const [entries, setEntries] = useState([]); // unordered list of entry numbers from Supabase
   const [notes, setNotes] = useState({});
   const [submittedAt, setSubmittedAt] = useState(null);
   const [saveStatus, setSaveStatus] = useState('idle');
@@ -44,7 +29,7 @@ export default function App() {
       return;
     }
 
-    setRanking(data.ranking || []);
+    setEntries(data.ranking || []);
     setNotes(data.notes || {});
     setSubmittedAt(data.submitted_at);
 
@@ -83,13 +68,13 @@ export default function App() {
   const saveTimer = useRef(null);
 
   const saveToSupabase = useCallback(
-    async (newRanking, newNotes) => {
+    async (newEntries, newNotes) => {
       setSaveStatus('saving');
 
       const { error: dbErr } = await supabase
         .from('ranking_submissions')
         .update({
-          ranking: newRanking,
+          ranking: newEntries,
           notes: newNotes,
           last_updated: new Date().toISOString(),
         })
@@ -102,58 +87,55 @@ export default function App() {
   );
 
   const scheduleSave = useCallback(
-    (newRanking, newNotes) => {
+    (newEntries, newNotes) => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
-
       saveTimer.current = setTimeout(() => {
-        saveToSupabase(newRanking, newNotes);
+        saveToSupabase(newEntries, newNotes);
       }, 600);
     },
     [saveToSupabase]
   );
 
-  const handleDragEnd = (event) => {
-    const { active, over } = event;
-
-    if (!over || active.id === over.id) return;
-
-    setRanking((prev) => {
-      const oldIdx = prev.indexOf(active.id);
-      const newIdx = prev.indexOf(over.id);
-
-      const next = arrayMove(prev, oldIdx, newIdx);
-
-      scheduleSave(next, notes);
-
-      return next;
-    });
-  };
-
   const handleNotesUpdate = (entryNum, updatedEntryNotes) => {
     setNotes((prev) => {
-      const next = {
-        ...prev,
-        [entryNum]: updatedEntryNotes,
-      };
-
-      scheduleSave(ranking, next);
-
+      const next = { ...prev, [entryNum]: updatedEntryNotes };
+      scheduleSave(entries, next);
       return next;
     });
   };
 
   const handleSubmit = async () => {
+    // Check for ties (including unscored entries, which all tie at 0)
+    const ties = findTies(entries, notes);
+    if (ties.length > 0) {
+      const lines = ties.map(({ score, entries: group }) => {
+        const list = group.map((n) => `#${n}`).join(', ');
+        return score === 0
+          ? `  • Entries ${list} — not yet scored (0/100)`
+          : `  • Entries ${list} — tied at ${score}/100`;
+      });
+      window.alert(
+        `Please resolve these ties before submitting:\n\n${lines.join('\n')}`
+      );
+      return;
+    }
+
     const ok = window.confirm(
-      'Submit your final rankings? You will not be able to edit after this.'
+      'Submit your final scores? You will not be able to edit after this.'
     );
 
     if (!ok) return;
+
+    // Derive final ranked order from scores at submit time
+    const finalRanking = [...entries].sort(
+      (a, b) => totalScore(notes[b]) - totalScore(notes[a])
+    );
 
     const { error: dbErr } = await supabase
       .from('ranking_submissions')
       .update({
         submitted_at: new Date().toISOString(),
-        ranking,
+        ranking: finalRanking,
         notes,
         last_updated: new Date().toISOString(),
       })
@@ -182,9 +164,7 @@ export default function App() {
 
         <div className="screen">
           <h1>{EVENT_NAME}</h1>
-
           <p className="muted">Enter your judge code to begin or resume.</p>
-
           <input
             className="input"
             value={judgeCode}
@@ -192,11 +172,9 @@ export default function App() {
             placeholder="Judge code"
             autoCapitalize="off"
           />
-
           <button className="btn-primary" onClick={handleCodeSubmit}>
             Continue
           </button>
-
           {error && <p className="error">{error}</p>}
         </div>
       </div>
@@ -216,20 +194,16 @@ export default function App() {
 
         <div className="screen">
           <h1>Welcome</h1>
-
           <p className="muted">What name should appear on your scorecard?</p>
-
           <input
             className="input"
             value={judgeName}
             onChange={(e) => setJudgeName(e.target.value)}
             placeholder="Your name"
           />
-
           <button className="btn-primary" onClick={handleNameSubmit}>
             Start Judging
           </button>
-
           {error && <p className="error">{error}</p>}
         </div>
       </div>
@@ -249,9 +223,7 @@ export default function App() {
 
         <div className="screen">
           <h1>Submitted</h1>
-
-          <p>Thanks, {judgeName}. Your rankings have been locked in.</p>
-
+          <p>Thanks, {judgeName}. Your scores have been locked in.</p>
           <p className="muted">
             Submitted {new Date(submittedAt).toLocaleString()}.
           </p>
@@ -261,11 +233,10 @@ export default function App() {
   }
 
   return (
-    <RankingScreen
+    <ScoringScreen
       judgeName={judgeName}
-      ranking={ranking}
+      entries={entries}
       notes={notes}
-      onDragEnd={handleDragEnd}
       onNotesUpdate={handleNotesUpdate}
       onSubmit={handleSubmit}
       saveStatus={saveStatus}
@@ -273,24 +244,19 @@ export default function App() {
   );
 }
 
-function RankingScreen({
+function ScoringScreen({
   judgeName,
-  ranking,
+  entries,
   notes,
-  onDragEnd,
   onNotesUpdate,
   onSubmit,
   saveStatus,
 }) {
   const [openEntry, setOpenEntry] = useState(null);
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: { distance: 5 },
-    }),
-    useSensor(TouchSensor, {
-      activationConstraint: { delay: 100, tolerance: 12 },
-    })
+  // Always sorted by total score descending — updates automatically on every score change
+  const sortedEntries = [...entries].sort(
+    (a, b) => totalScore(notes[b]) - totalScore(notes[a])
   );
 
   return (
@@ -315,28 +281,21 @@ function RankingScreen({
       </header>
 
       <p className="muted small">
-        Long-press the handle (⋮⋮) to drag. Tap the note icon to add notes.
+        Tap an entry to score it. Rankings update automatically.
       </p>
 
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragEnd={onDragEnd}
-      >
-        <SortableContext items={ranking} strategy={verticalListSortingStrategy}>
-          <ul className="rank-list">
-            {ranking.map((entryNum, idx) => (
-              <SortableEntry
-                key={entryNum}
-                id={entryNum}
-                position={idx + 1}
-                hasNotes={hasAnyNote(notes[entryNum])}
-                onTap={() => setOpenEntry(entryNum)}
-              />
-            ))}
-          </ul>
-        </SortableContext>
-      </DndContext>
+      <ul className="rank-list">
+        {sortedEntries.map((entryNum, idx) => (
+          <EntryRow
+            key={entryNum}
+            id={entryNum}
+            position={idx + 1}
+            hasNotes={hasAnyNote(notes[entryNum])}
+            score={totalScore(notes[entryNum])}
+            onTap={() => setOpenEntry(entryNum)}
+          />
+        ))}
+      </ul>
 
       {openEntry !== null && (
         <EntryModal
@@ -350,38 +309,17 @@ function RankingScreen({
   );
 }
 
-function SortableEntry({ id, position, hasNotes, onTap }) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id });
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-  };
-
+function EntryRow({ id, position, hasNotes, score, onTap }) {
   return (
-    <li ref={setNodeRef} style={style} className="rank-item">
-      <span
-        className="drag-handle"
-        {...attributes}
-        {...listeners}
-        aria-label="Drag to reorder"
-      >
-        ⋮⋮
-      </span>
-
+    <li className="rank-item">
       <span className="position">{position}</span>
-
       <span className="entry-num">Entry #{id}</span>
-
-      <button className="notes-btn" onClick={onTap} aria-label="Add notes">
+      <span className="entry-score">{score}/100</span>
+      <button
+        className="notes-btn"
+        onClick={onTap}
+        aria-label="Score and add notes"
+      >
         {hasNotes ? '📝' : '＋'}
       </button>
     </li>
@@ -391,15 +329,36 @@ function SortableEntry({ id, position, hasNotes, onTap }) {
 function EntryModal({ entryNum, notes, onClose, onSave }) {
   const [local, setLocal] = useState(notes);
 
-  const updateField = (key, value) => {
+  const updateField = (key, field, value) => {
     const next = {
       ...local,
-      [key]: value,
+      [key]: {
+        ...(local[key] || {}),
+        [field]: value,
+      },
     };
-
     setLocal(next);
     onSave(next);
   };
+
+  const updateTopLevel = (key, value) => {
+    const next = { ...local, [key]: value };
+    setLocal(next);
+    onSave(next);
+  };
+
+  const handlePlacement = (value) => {
+    updateTopLevel('placement', local.placement === value ? null : value);
+  };
+
+  const runningTotal = totalScore(local);
+  const maxTotal = CATEGORIES.reduce((sum, c) => sum + c.maxScore, 0);
+
+  const PLACEMENT_OPTIONS = [
+    { value: 'mids', label: 'Mids', className: 'placement-mids' },
+    { value: 'average', label: 'Average', className: 'placement-average' },
+    { value: 'fire', label: 'Fire 🔥', className: 'placement-fire' },
+  ];
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -407,50 +366,156 @@ function EntryModal({ entryNum, notes, onClose, onSave }) {
         <header className="modal-header">
           <h2>Entry #{entryNum}</h2>
 
-          <button className="close-btn" onClick={onClose} aria-label="Close">
-            ×
-          </button>
+          <div className="modal-header-right">
+            <span className="modal-total">
+              {runningTotal} / {maxTotal}
+            </span>
+            <button className="close-btn" onClick={onClose} aria-label="Close">
+              ×
+            </button>
+          </div>
         </header>
 
         <div className="modal-body">
           {CATEGORIES.map((cat) => (
             <div key={cat.key} className="category-block">
-              <label className="cat-label">{cat.label}</label>
+              <div className="cat-header">
+                <label className="cat-label">{cat.label}</label>
+                <ScoreStepper
+                  value={local[cat.key]?.score ?? 0}
+                  max={cat.maxScore}
+                  onChange={(val) => updateField(cat.key, 'score', val)}
+                />
+              </div>
 
               <p className="cat-desc">{cat.description}</p>
 
               <textarea
                 className="cat-notes"
-                value={local[cat.key] || ''}
-                onChange={(e) => updateField(cat.key, e.target.value)}
-                placeholder="Your notes..."
-                rows={3}
+                value={local[cat.key]?.text || ''}
+                onChange={(e) => updateField(cat.key, 'text', e.target.value)}
+                placeholder="Notes..."
+                rows={2}
               />
             </div>
           ))}
+
+          <div className="modal-divider" />
+
+          <div className="category-block">
+            <label className="cat-label">Where does this entry place?</label>
+            <div className="placement-options">
+              {PLACEMENT_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  className={`placement-btn ${opt.className}${
+                    local.placement === opt.value ? ' selected' : ''
+                  }`}
+                  onClick={() => handlePlacement(opt.value)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="category-block">
+            <label className="cat-label">Overall Notes</label>
+            <textarea
+              className="cat-notes"
+              value={local.overall_notes || ''}
+              onChange={(e) => updateTopLevel('overall_notes', e.target.value)}
+              placeholder="Overall impressions..."
+              rows={3}
+            />
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
+function ScoreStepper({ value, max, onChange }) {
+  const decrement = () => onChange(roundHalf(Math.max(0, value - 0.5)));
+  const increment = () => onChange(roundHalf(Math.min(max, value + 0.5)));
+
+  return (
+    <div className="stepper">
+      <button
+        className="stepper-btn"
+        onClick={decrement}
+        disabled={value <= 0}
+        aria-label="Decrease score"
+      >
+        −
+      </button>
+      <span className="stepper-value">{value}</span>
+      <span className="stepper-max">/ {max}</span>
+      <button
+        className="stepper-btn"
+        onClick={increment}
+        disabled={value >= max}
+        aria-label="Increase score"
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
+function roundHalf(val) {
+  return Math.round(val * 2) / 2;
+}
+
+function findTies(entries, notes) {
+  const byScore = {};
+  for (const entryNum of entries) {
+    const s = totalScore(notes[entryNum]);
+    if (!byScore[s]) byScore[s] = [];
+    byScore[s].push(entryNum);
+  }
+  return Object.entries(byScore)
+    .filter(([, group]) => group.length > 1)
+    .map(([score, group]) => ({ score: Number(score), entries: group }));
+}
+
+// Returns a number — 0 if no scores entered yet
+function totalScore(entryNotes) {
+  if (!entryNotes) return 0;
+  let total = 0;
+  for (const cat of CATEGORIES) {
+    const val = entryNotes[cat.key];
+    if (val && val.score !== undefined && val.score !== '') {
+      total += Number(val.score);
+    }
+  }
+  return total;
+}
+
+// Only true if judge has entered a score > 0, written any notes, or selected a placement
 function hasAnyNote(entryNotes) {
   if (!entryNotes) return false;
-
-  return Object.values(entryNotes).some((v) => v && v.trim().length > 0);
+  if (entryNotes.placement) return true;
+  if (entryNotes.overall_notes && entryNotes.overall_notes.trim().length > 0)
+    return true;
+  return CATEGORIES.some((cat) => {
+    const v = entryNotes[cat.key];
+    return (
+      v &&
+      ((typeof v.score === 'number' && v.score > 0) ||
+        (v.text && v.text.trim().length > 0))
+    );
+  });
 }
 
 function saveStatusLabel(status) {
   switch (status) {
     case 'saving':
       return 'Saving…';
-
     case 'saved':
       return 'Saved ✓';
-
     case 'error':
       return 'Save failed — check connection';
-
     default:
       return '';
   }
