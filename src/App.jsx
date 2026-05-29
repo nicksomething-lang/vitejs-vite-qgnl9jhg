@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { supabase } from './supabaseClient';
 import { EVENT_CODE, EVENT_NAME, CATEGORIES } from './config';
 
@@ -11,11 +11,36 @@ export default function App() {
   const [step, setStep] = useState('code');
   const [judgeCode, setJudgeCode] = useState('');
   const [judgeName, setJudgeName] = useState('');
-  const [entries, setEntries] = useState([]); // unordered list of entry numbers from Supabase
+  const [entries, setEntries] = useState([]);
   const [notes, setNotes] = useState({});
   const [submittedAt, setSubmittedAt] = useState(null);
   const [saveStatus, setSaveStatus] = useState('idle');
+  const [lastSavedAt, setLastSavedAt] = useState(null);
   const [error, setError] = useState('');
+
+  const saveTimer = useRef(null);
+  const retryTimer = useRef(null);
+  const retryCount = useRef(0);
+
+  // Tick every 30s so "saved X ago" display stays fresh
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setLastSavedAt((prev) => (prev ? new Date(prev.getTime()) : prev));
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Warn before closing/refreshing if a save is in flight or failed
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (saveStatus === 'saving' || saveStatus === 'error') {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [saveStatus]);
 
   const handleCodeSubmit = async () => {
     setError('');
@@ -34,8 +59,32 @@ export default function App() {
       return;
     }
 
-    setEntries(data.ranking || []);
-    setNotes(data.notes || {});
+    // Check localStorage for data that might be newer than Supabase
+    // (happens when a save failed due to network issues)
+    let finalEntries = data.ranking || [];
+    let finalNotes = data.notes || {};
+    let restoredFromLocal = false;
+
+    try {
+      const localRaw = localStorage.getItem(localKey(EVENT_CODE, code));
+      if (localRaw) {
+        const localData = JSON.parse(localRaw);
+        const localTime = new Date(localData.lastUpdated).getTime();
+        const supabaseTime = data.last_updated
+          ? new Date(data.last_updated).getTime()
+          : 0;
+        if (localTime > supabaseTime) {
+          finalEntries = localData.ranking || finalEntries;
+          finalNotes = localData.notes || {};
+          restoredFromLocal = true;
+        }
+      }
+    } catch (_) {
+      // localStorage unavailable or corrupt — Supabase data is fine
+    }
+
+    setEntries(finalEntries);
+    setNotes(finalNotes);
     setSubmittedAt(data.submitted_at);
 
     if (data.submitted_at) {
@@ -46,6 +95,19 @@ export default function App() {
     } else {
       setJudgeName(data.judge_name);
       setStep('rank');
+
+      // If localStorage had newer data, sync it back to Supabase immediately
+      if (restoredFromLocal) {
+        supabase
+          .from('ranking_submissions')
+          .update({
+            ranking: finalEntries,
+            notes: finalNotes,
+            last_updated: new Date().toISOString(),
+          })
+          .eq('event_code', EVENT_CODE)
+          .eq('judge_code', code);
+      }
     }
   };
 
@@ -70,30 +132,57 @@ export default function App() {
     setStep('rank');
   };
 
-  const saveTimer = useRef(null);
-
   const saveToSupabase = useCallback(
     async (newEntries, newNotes) => {
       setSaveStatus('saving');
+      const now = new Date().toISOString();
+
+      // Mirror to localStorage first — instant, offline-safe fallback
+      try {
+        localStorage.setItem(
+          localKey(EVENT_CODE, judgeCode),
+          JSON.stringify({ ranking: newEntries, notes: newNotes, lastUpdated: now })
+        );
+      } catch (_) {
+        // Private browsing or storage full — skip silently
+      }
 
       const { error: dbErr } = await supabase
         .from('ranking_submissions')
         .update({
           ranking: newEntries,
           notes: newNotes,
-          last_updated: new Date().toISOString(),
+          last_updated: now,
         })
         .eq('event_code', EVENT_CODE)
         .eq('judge_code', judgeCode);
 
-      setSaveStatus(dbErr ? 'error' : 'saved');
+      if (dbErr) {
+        setSaveStatus('error');
+        // Exponential backoff retry: 2s, 4s, 8s, 16s, 30s (max 5 attempts)
+        if (retryCount.current < 5) {
+          const delay = Math.min(30000, 2000 * Math.pow(2, retryCount.current));
+          retryCount.current += 1;
+          retryTimer.current = setTimeout(() => {
+            saveToSupabase(newEntries, newNotes);
+          }, delay);
+        }
+      } else {
+        retryCount.current = 0;
+        setLastSavedAt(new Date());
+        setSaveStatus('saved');
+      }
     },
     [judgeCode]
   );
 
   const scheduleSave = useCallback(
     (newEntries, newNotes) => {
+      // Cancel any pending debounce or retry before scheduling a fresh save
       if (saveTimer.current) clearTimeout(saveTimer.current);
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+      retryCount.current = 0;
+
       saveTimer.current = setTimeout(() => {
         saveToSupabase(newEntries, newNotes);
       }, 600);
@@ -110,14 +199,13 @@ export default function App() {
   };
 
   const handleSubmit = async () => {
-    // Check for ties (including unscored entries, which all tie at 0)
     const ties = findTies(entries, notes);
     if (ties.length > 0) {
       const lines = ties.map(({ score, entries: group }) => {
         const list = group.map((n) => `#${n}`).join(', ');
         return score === 0
           ? `  • Entries ${list} — not yet scored (0/100)`
-          : `  • Entries ${list} — tied at ${score}/100`;
+          : `  • Entries ${list} — tied at ${displayScore(score)}/100`;
       });
       window.alert(
         `Please resolve these ties before submitting:\n\n${lines.join('\n')}`
@@ -128,10 +216,8 @@ export default function App() {
     const ok = window.confirm(
       'Submit your final scores? You will not be able to edit after this.'
     );
-
     if (!ok) return;
 
-    // Derive final ranked order from scores at submit time
     const finalRanking = [...entries].sort(
       (a, b) => totalScore(notes[b]) - totalScore(notes[a])
     );
@@ -162,7 +248,6 @@ export default function App() {
         <div className="top-header">
           <img src="/mothership.jpeg" alt="Mothership Meltdown" className="top-header-image" />
         </div>
-
         <div className="screen">
           <h1>{EVENT_NAME}</h1>
           <p className="muted">Enter your judge code to begin or resume.</p>
@@ -188,7 +273,6 @@ export default function App() {
         <div className="top-header">
           <img src="/mothership.jpeg" alt="Mothership Meltdown" className="top-header-image" />
         </div>
-
         <div className="screen">
           <h1>Welcome</h1>
           <p className="muted">What name should appear on your scorecard?</p>
@@ -213,7 +297,6 @@ export default function App() {
         <div className="top-header">
           <img src="/mothership.jpeg" alt="Mothership Meltdown" className="top-header-image" />
         </div>
-
         <div className="screen">
           <h1>Submitted</h1>
           <p>Thanks, {judgeName}. Your scores have been locked in.</p>
@@ -233,11 +316,12 @@ export default function App() {
       onNotesUpdate={handleNotesUpdate}
       onSubmit={handleSubmit}
       saveStatus={saveStatus}
+      lastSavedAt={lastSavedAt}
     />
   );
 }
 
-function ScoringScreen({ judgeName, entries, notes, onNotesUpdate, onSubmit, saveStatus }) {
+function ScoringScreen({ judgeName, entries, notes, onNotesUpdate, onSubmit, saveStatus, lastSavedAt }) {
   const [openEntry, setOpenEntry] = useState(null);
   const [sortOrder, setSortOrder] = useState('rank');
 
@@ -268,9 +352,8 @@ function ScoringScreen({ judgeName, entries, notes, onNotesUpdate, onSubmit, sav
       <header className="rank-header">
         <div>
           <div className="judge-name">{judgeName}</div>
-          <div className="save-status">{saveStatusLabel(saveStatus)}</div>
+          <div className="save-status">{saveStatusLabel(saveStatus, lastSavedAt)}</div>
         </div>
-
         <button className="btn-submit" onClick={onSubmit}>
           Submit
         </button>
@@ -341,10 +424,7 @@ function EntryModal({ entryNum, notes, onClose, onSave }) {
   const updateField = (key, field, value) => {
     const next = {
       ...local,
-      [key]: {
-        ...(local[key] || {}),
-        [field]: value,
-      },
+      [key]: { ...(local[key] || {}), [field]: value },
     };
     setLocal(next);
     onSave(next);
@@ -361,7 +441,6 @@ function EntryModal({ entryNum, notes, onClose, onSave }) {
   };
 
   const runningTotal = totalScore(local);
-  const maxTotal = CATEGORIES.reduce((sum, c) => sum + c.maxScore, 0);
 
   const PLACEMENT_OPTIONS = [
     { value: 'mids',    label: 'Mids',    className: 'placement-mids' },
@@ -374,12 +453,9 @@ function EntryModal({ entryNum, notes, onClose, onSave }) {
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <header className="modal-header">
           <h2>Entry #{entryNum}</h2>
-
           <div className="modal-header-right">
             <span className="modal-total">{displayScore(runningTotal)} / 100</span>
-            <button className="close-btn" onClick={onClose} aria-label="Close">
-              ×
-            </button>
+            <button className="close-btn" onClick={onClose} aria-label="Close">×</button>
           </div>
         </header>
 
@@ -394,9 +470,7 @@ function EntryModal({ entryNum, notes, onClose, onSave }) {
                   onChange={(val) => updateField(cat.key, 'score', val)}
                 />
               </div>
-
               <p className="cat-desc">{cat.description}</p>
-
               <textarea
                 className="cat-notes"
                 value={local[cat.key]?.text || ''}
@@ -478,6 +552,12 @@ function ScoreInput({ value, max, onChange }) {
   );
 }
 
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function localKey(eventCode, judgeCode) {
+  return `mm26_${eventCode}_${judgeCode}`;
+}
+
 function roundHalf(val) {
   return Math.round(val * 2) / 2;
 }
@@ -494,7 +574,6 @@ function findTies(entries, notes) {
     .map(([score, group]) => ({ score: Number(score), entries: group }));
 }
 
-// Returns a number — 0 if no scores entered yet
 function totalScore(entryNotes) {
   if (!entryNotes) return 0;
   let total = 0;
@@ -507,7 +586,6 @@ function totalScore(entryNotes) {
   return total;
 }
 
-// Only true if judge has entered a score > 0, written any notes, or selected a placement
 function hasAnyNote(entryNotes) {
   if (!entryNotes) return false;
   if (entryNotes.placement) return true;
@@ -518,11 +596,21 @@ function hasAnyNote(entryNotes) {
   });
 }
 
-function saveStatusLabel(status) {
+function timeAgo(date) {
+  if (!date) return '';
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes === 1) return '1 min ago';
+  if (minutes < 60) return `${minutes} min ago`;
+  return 'a while ago';
+}
+
+function saveStatusLabel(status, lastSavedAt) {
   switch (status) {
-    case 'saving':  return 'Saving…';
-    case 'saved':   return 'Saved ✓';
-    case 'error':   return 'Save failed — check connection';
-    default:        return '';
+    case 'saving': return 'Saving…';
+    case 'error':  return 'Save failed — retrying…';
+    case 'saved':  return `Saved ${timeAgo(lastSavedAt)}`;
+    default:       return '';
   }
 }
